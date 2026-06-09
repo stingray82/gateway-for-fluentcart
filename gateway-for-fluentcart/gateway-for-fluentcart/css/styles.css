@@ -1,0 +1,299 @@
+/* FluentCart-style customer licence management styles. */
+.rup-gateway-fc-licences {
+    width: 100%;
+    max-width: 100%;
+    color: #1f2937;
+    font-size: 14px;
+}
+
+.rup-gateway-fc-empty-state {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 24px;
+    color: #565865;
+}
+
+.rup-gateway-fc-license-card {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    margin: 0 0 16px;
+    overflow: hidden;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.rup-gateway-fc-license-card-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: center;
+    padding: 18px 20px;
+    cursor: pointer;
+    border-bottom: 1px solid #eef0f4;
+    background: #fff;
+}
+
+.rup-gateway-fc-license-title-wrap h3 {
+    margin: 0 0 6px;
+    font-size: 16px;
+    line-height: 1.35;
+    color: #101828;
+    font-weight: 600;
+}
+
+.rup-gateway-fc-license-key {
+    margin: 0;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+    color: #6b7280;
+    font-size: 13px;
+}
+
+.rup-gateway-fc-license-key span {
+    color: #8a8f9d;
+}
+
+.rup-gateway-fc-license-key code {
+    background: #f8fafc;
+    color: #111827;
+    padding: 3px 6px;
+    border-radius: 5px;
+    font-size: 12px;
+    word-break: break-all;
+}
+
+.rup-gateway-fc-actions,
+.accordion-header-buttons {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+.rup-gateway-fc-primary-button,
+.rup-gateway-fc-secondary-button,
+.toggle-details-btn,
+.download-btn,
+.add-site-form button,
+.remove-site-btn {
+    border: 0;
+    border-radius: 6px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 36px;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1;
+    text-decoration: none !important;
+    transition: opacity .15s ease, transform .15s ease;
+}
+
+.rup-gateway-fc-primary-button,
+.download-btn {
+    background: #16a34a;
+    color: #fff !important;
+}
+
+.rup-gateway-fc-secondary-button,
+.toggle-details-btn {
+    background: #0f6da8;
+    color: #fff;
+}
+
+.rup-gateway-fc-primary-button:hover,
+.rup-gateway-fc-secondary-button:hover,
+.toggle-details-btn:hover,
+.download-btn:hover,
+.add-site-form button:hover,
+.remove-site-btn:hover {
+    opacity: .9;
+}
+
+.rup-gateway-fc-license-card-content {
+    display: none;
+    padding: 20px;
+    background: #fff;
+}
+
+.rup-gateway-fc-license-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 18px;
+}
+
+.rup-gateway-fc-license-meta {
+    background: #f8fafc;
+    border: 1px solid #eef0f4;
+    border-radius: 8px;
+    padding: 10px 12px;
+}
+
+.rup-gateway-fc-license-meta span {
+    display: block;
+    color: #8a8f9d;
+    font-size: 11px;
+    margin-bottom: 4px;
+}
+
+.rup-gateway-fc-license-meta strong {
+    display: block;
+    color: #111827;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.rup-gateway-fc-status-active {
+    color: #15803d !important;
+}
+
+.rup-gateway-fc-status-expired,
+.rup-gateway-fc-status-cancelled,
+.rup-gateway-fc-status-refunded {
+    color: #b91c1c !important;
+}
+
+.rup-gateway-fc-manage-sites {
+    border-top: 1px solid #eef0f4;
+    padding-top: 18px;
+}
+
+.rup-gateway-fc-manage-sites h4 {
+    margin: 0 0 12px;
+    color: #111827;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.rup-gateway-fc-muted {
+    color: #565865;
+    margin: 0 0 14px;
+}
+
+.site-list {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 16px;
+    border: 1px solid #eef0f4;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.site-list li {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 12px;
+    border-bottom: 1px solid #eef0f4;
+    color: #374151;
+}
+
+.site-list li:last-child {
+    border-bottom: none;
+}
+
+.add-site-form {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+.add-site-form input[type="text"] {
+    flex: 1;
+    min-height: 38px;
+    padding: 8px 12px;
+    border: 1px solid #d9dde7;
+    border-radius: 6px;
+    color: #111827;
+    background: #fff;
+}
+
+.add-site-form input[type="text"]:focus {
+    outline: none;
+    border-color: #97b7ff;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, .1);
+}
+
+.add-site-form button {
+    background: #16a34a;
+    color: #fff;
+}
+
+.remove-site-btn {
+    min-height: 30px;
+    padding: 6px 10px;
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+@media (max-width: 760px) {
+    .rup-gateway-fc-license-card-header,
+    .add-site-form {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .rup-gateway-fc-actions,
+    .accordion-header-buttons {
+        justify-content: flex-start;
+        flex-wrap: wrap;
+    }
+
+    .rup-gateway-fc-license-meta-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.rup-gateway-fc-copy-license-key {
+    border: 1px solid #d9dde7;
+    border-radius: 5px;
+    background: #fff;
+    color: #374151;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    min-height: 26px;
+    padding: 4px 8px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+}
+
+.rup-gateway-fc-copy-license-key:hover {
+    background: #eef2f7;
+    border-color: #c9ceda;
+    color: #111827;
+}
+
+.rup-gateway-fc-copy-license-key.is-copied {
+    opacity: 1;
+}
+
+.rup-gateway-fc-copy-license-key {
+    white-space: nowrap;
+}
+
+.rup-gateway-fc-copy-license-key.is-copied {
+    opacity: 1;
+}
+
+
+/* Compact one-line licence details and readable copy button states. */
+.rup-gateway-fc-copy-license-key:hover,
+.rup-gateway-fc-copy-license-key:focus,
+.rup-gateway-fc-copy-license-key.is-copied {
+    background: #eef2f7;
+    color: #111827;
+    border-color: #c9ceda;
+}
+
+.rup-gateway-fc-status {
+    font-size: 13px;
+}
