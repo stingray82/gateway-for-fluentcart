@@ -7,6 +7,51 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
+function rup_gateway_fc_get_debug_log_path() {
+    $directory = trailingslashit( dirname( untrailingslashit( ABSPATH ) ) ) . 'uupd-gateway-logs';
+    if ( ! is_dir( $directory ) && ! wp_mkdir_p( $directory ) ) {
+        return '';
+    }
+    @chmod( $directory, 0700 );
+
+    $state = get_option( 'rup_gateway_fc_debug_log_state', array() );
+    $now = time();
+    $old_name = isset( $state['name'] ) && preg_match( '/^fc-gateway-[a-f0-9]{32}\.log$/', $state['name'] ) ? $state['name'] : '';
+    $old_path = $old_name ? trailingslashit( $directory ) . $old_name : '';
+    $rotate = ! $old_name || ! is_file( $old_path ) || ! is_writable( $old_path ) || empty( $state['created'] ) || $now - absint( $state['created'] ) >= 7 * DAY_IN_SECONDS || filesize( $old_path ) >= 5 * 1024 * 1024;
+
+    if ( $rotate ) {
+        try {
+            $name = 'fc-gateway-' . bin2hex( random_bytes( 16 ) ) . '.log';
+        } catch ( Exception $e ) {
+            return '';
+        }
+        $path = trailingslashit( $directory ) . $name;
+        if ( false === @file_put_contents( $path, '' ) ) {
+            return '';
+        }
+        @chmod( $path, 0600 );
+        if ( ! update_option( 'rup_gateway_fc_debug_log_state', array( 'name' => $name, 'created' => $now ), false ) ) {
+            @unlink( $path );
+            return '';
+        }
+        if ( $old_path && is_file( $old_path ) ) {
+            @unlink( $old_path );
+        }
+        // Remove the former predictable log from the public uploads directory.
+        $legacy_options = get_option( 'rup_gateway_fc_options', array() );
+        $legacy_name = ! empty( $legacy_options['debug_log_name'] ) ? sanitize_file_name( $legacy_options['debug_log_name'] ) : 'fc-gateway-debug.log';
+        $uploads = wp_upload_dir();
+        $legacy_path = trailingslashit( $uploads['basedir'] ) . $legacy_name;
+        if ( is_file( $legacy_path ) ) {
+            @unlink( $legacy_path );
+        }
+        return $path;
+    }
+
+    return $old_path;
+}
+
 function rup_gateway_fc_debug_log( $message ) {
     $options = function_exists( 'rup_gateway_fc_get_options' ) ? rup_gateway_fc_get_options() : array();
     $debug_enabled = ! empty( $options['debug_enabled'] );
@@ -15,10 +60,34 @@ function rup_gateway_fc_debug_log( $message ) {
         return;
     }
 
-    $upload_dir = wp_upload_dir();
-    $log_name   = ! empty( $options['debug_log_name'] ) ? sanitize_file_name( $options['debug_log_name'] ) : 'fc-gateway-debug.log';
-    $log_file   = trailingslashit( $upload_dir['basedir'] ) . $log_name;
-    @file_put_contents( $log_file, date( 'Y-m-d H:i:s' ) . ' - ' . print_r( $message, true ) . PHP_EOL, FILE_APPEND );
+    $log_file = rup_gateway_fc_get_debug_log_path();
+    if ( $log_file ) {
+        @file_put_contents( $log_file, gmdate( 'Y-m-d H:i:s' ) . ' UTC - ' . print_r( $message, true ) . PHP_EOL, FILE_APPEND | LOCK_EX );
+    }
+}
+
+function rup_gateway_fc_record_license_event( $license_id, $event, $details = array() ) {
+    $license_id = absint( $license_id );
+    if ( ! $license_id ) {
+        return;
+    }
+    if ( function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() && function_exists( 'uupd_record_license_interaction' ) ) {
+        uupd_record_license_interaction( $license_id, $event, $details );
+        return;
+    }
+    if ( ! function_exists( 'rup_gateway_fc_get_options' ) || empty( rup_gateway_fc_get_options()['license_history_enabled'] ) ) {
+        return;
+    }
+    $safe = array();
+    foreach ( array( 'order_id', 'subscription_id', 'reason', 'result', 'status', 'expiry', 'source' ) as $key ) {
+        if ( isset( $details[ $key ] ) && is_scalar( $details[ $key ] ) ) {
+            $safe[ $key ] = substr( sanitize_text_field( (string) $details[ $key ] ), 0, 120 );
+        }
+    }
+    $history = get_post_meta( $license_id, '_uupd_interaction_history', true );
+    $history = is_array( $history ) ? $history : array();
+    $history[] = array( 'at' => current_time( 'mysql' ), 'event' => sanitize_key( $event ), 'details' => $safe );
+    update_post_meta( $license_id, '_uupd_interaction_history', array_slice( $history, -20 ) );
 }
 
 function rup_gateway_fc_get_mapping_table() {
@@ -287,9 +356,9 @@ function rup_gateway_fc_insert_license_link( $args ) {
     $data = wp_parse_args( $args, $defaults );
     $data['customer_email'] = sanitize_email( $data['customer_email'] );
 
-    $wpdb->insert( rup_gateway_fc_get_license_links_table(), $data );
+    $inserted = $wpdb->insert( rup_gateway_fc_get_license_links_table(), $data );
     rup_gateway_fc_debug_log( array( 'license_link_stored' => $data, 'db_error' => $wpdb->last_error ) );
-    return empty( $wpdb->last_error );
+    return false !== $inserted;
 }
 
 function rup_gateway_fc_get_license_links( $args = array() ) {
@@ -300,7 +369,7 @@ function rup_gateway_fc_get_license_links( $args = array() ) {
 
     $where = array( 'license_id > 0' );
     $values = array();
-    foreach ( array( 'order_id', 'order_item_id', 'subscription_id', 'user_id', 'mapping_id', 'download_id' ) as $field ) {
+    foreach ( array( 'order_id', 'order_item_id', 'subscription_id', 'user_id', 'mapping_id', 'download_id', 'quantity_index' ) as $field ) {
         if ( ! empty( $args[ $field ] ) ) {
             $where[] = "{$field} = %d";
             $values[] = absint( $args[ $field ] );
@@ -736,6 +805,7 @@ function rup_gateway_fc_update_license_by_id( $license_id, $mapping, $expiry_dat
     }
 
     $response = rup_gateway_fc_provider_update_license( $license_id, $update_data, array_merge( $context, array( 'reason' => $reason ) ) );
+    rup_gateway_fc_record_license_event( $license_id, 'subscription_renewal', array( 'reason' => $reason, 'order_id' => $context['order_id'] ?? 0, 'subscription_id' => $context['subscription_id'] ?? 0, 'expiry' => $expiry_date, 'result' => is_wp_error( $response ) ? 'failed' : 'updated', 'source' => 'fluentcart' ) );
     rup_gateway_fc_debug_log( array(
         'license_provider_update_response' => $response,
         'provider'                         => rup_gateway_fc_get_license_provider(),
@@ -887,119 +957,179 @@ function rup_gateway_fc_extend_licenses_for_subscription( $data, $reason = 'subs
     }
 }
 
+function rup_gateway_fc_alert_order_issue( $order_id, $slot, $reason ) {
+    $options = rup_gateway_fc_get_options();
+    $email = isset( $options['failure_alert_email'] ) ? sanitize_email( $options['failure_alert_email'] ) : '';
+    rup_gateway_fc_debug_log( array( 'order_issue' => array( 'order_id' => $order_id, 'slot' => $slot, 'reason' => $reason ) ) );
+    if ( ! $email || ! is_email( $email ) ) {
+        return;
+    }
+
+    $notice_key = 'rup_gateway_fc_alert_' . md5( $order_id . ':' . $slot . ':' . $reason );
+    if ( get_transient( $notice_key ) ) {
+        return;
+    }
+    set_transient( $notice_key, 1, DAY_IN_SECONDS );
+    $sent = wp_mail(
+        $email,
+        sprintf( '[%s] FluentCart licence gateway issue for order %d', wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ), $order_id ),
+        "The gateway could not safely complete an order.\n\nOrder ID: {$order_id}\nItem slot: {$slot}\nIssue: {$reason}\n\nReview the order, gateway licence links and provider records before retrying. No licence key or customer details are included in this alert."
+    );
+    if ( ! $sent ) {
+        delete_transient( $notice_key );
+    }
+}
+
 function rup_gateway_fc_create_licenses_for_order( $order, $customer = null, $data = array() ) {
-    $email   = rup_gateway_fc_get_customer_email( $order, $customer );
-    $user_id = rup_gateway_fc_get_customer_user_id( $order, $customer, $email );
-
-    if ( ! $user_id ) {
-        rup_gateway_fc_debug_log( array( 'create_skipped' => 'No user could be resolved', 'email' => $email, 'order_summary' => rup_gateway_fc_debug_summarize( $order ), 'customer_summary' => rup_gateway_fc_debug_summarize( $customer ), 'fluentcart_payload' => rup_gateway_fc_debug_summarize( $data ) ) );
-        return;
-    }
-
     $order_id = rup_gateway_fc_get_order_id_from_order( $order );
-    $processed_orders = get_option( 'rup_gateway_fc_processed_orders', array() );
-    if ( $order_id && in_array( $order_id, array_map( 'absint', (array) $processed_orders ), true ) ) {
-        rup_gateway_fc_debug_log( array( 'order_already_processed' => $order_id ) );
+    if ( ! $order_id ) {
+        rup_gateway_fc_alert_order_issue( 0, 'order', 'Paid event has no order ID; issuing a licence would be unsafe.' );
         return;
     }
 
-    $existing_license_ids = rup_gateway_fc_get_user_license_ids( $user_id );
-    $items = rup_gateway_fc_extract_order_items( $order );
-    $base_date = rup_gateway_fc_get_object_value( $order, array( 'created_at', 'createdAt', 'date_created' ), '' );
+    global $wpdb;
+    $lock_name = 'rup_gateway_fc_order_' . $order_id;
+    if ( '1' !== (string) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 5)', $lock_name ) ) ) {
+        rup_gateway_fc_alert_order_issue( $order_id, 'order', 'Could not acquire the order processing lock; retry the paid event.' );
+        return;
+    }
 
-    rup_gateway_fc_debug_log( array(
-        'fluentcart_order_event_received' => array(
-            'order_id'        => $order_id,
-            'user_id'         => $user_id,
-            'email'           => $email,
-            'item_count'      => is_countable( $items ) ? count( $items ) : 0,
-            'order_summary'   => rup_gateway_fc_debug_summarize( $order ),
-            'payload_summary' => rup_gateway_fc_debug_summarize( $data ),
-        ),
-    ) );
-
-    foreach ( $items as $item ) {
-        $mapping = rup_gateway_fc_find_mapping_for_item( $item );
-        if ( ! $mapping ) {
-            rup_gateway_fc_debug_log( array( 'mapping_not_found' => rup_gateway_fc_item_candidate_ids( $item ), 'order_id' => $order_id, 'item_summary' => rup_gateway_fc_debug_summarize( $item ) ) );
-            continue;
+    try {
+        $email = rup_gateway_fc_get_customer_email( $order, $customer );
+        $user_id = rup_gateway_fc_get_customer_user_id( $order, $customer, $email );
+        if ( ! $user_id ) {
+            rup_gateway_fc_alert_order_issue( $order_id, 'order', 'No WordPress customer could be resolved.' );
+            return;
+        }
+        if ( ! rup_gateway_fc_ensure_license_links_table() ) {
+            rup_gateway_fc_alert_order_issue( $order_id, 'order', 'The gateway licence links table is unavailable.' );
+            return;
         }
 
-        $quantity        = max( 1, absint( rup_gateway_fc_get_object_value( $item, array( 'quantity', 'qty' ), 1 ) ) );
-        $order_item_id   = rup_gateway_fc_get_order_item_id( $item );
-        $subscription_id = rup_gateway_fc_get_subscription_id_for_order_item( $order, $item, $mapping, $data );
-        $candidate_ids   = rup_gateway_fc_item_candidate_ids( $item );
-        $subscription    = $subscription_id ? rup_gateway_fc_get_table_row_by_id( 'fct_subscriptions', $subscription_id ) : null;
-        $expiry_date     = $subscription ? rup_gateway_fc_get_subscription_expiry_from_row( $subscription ) : rup_gateway_fc_calculate_expiry_date( $mapping, $base_date );
-        list( $product_id, $variation_id ) = rup_gateway_fc_get_exact_item_product_variation_ids( $item, $mapping, $subscription );
+        $items = rup_gateway_fc_extract_order_items( $order );
+        if ( ! $items ) {
+            rup_gateway_fc_alert_order_issue( $order_id, 'order', 'Paid order has no readable line items.' );
+            return;
+        }
+        $state_key = 'rup_gateway_fc_order_state_' . $order_id;
+        $states = get_option( $state_key, array() );
+        $states = is_array( $states ) ? $states : array();
+        $legacy_processed = in_array( $order_id, array_map( 'absint', (array) get_option( 'rup_gateway_fc_processed_orders', array() ) ), true );
+        $preexisting_uupd_licenses = array();
+        if ( function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() ) {
+            $preexisting_uupd_licenses = get_posts( array(
+                'post_type' => 'uupd_license',
+                'post_status' => 'any',
+                'fields' => 'ids',
+                'posts_per_page' => -1,
+                'meta_query' => array(
+                    array( 'key' => 'order_id', 'value' => (string) $order_id ),
+                    array( 'key' => 'user_id', 'value' => $user_id ),
+                    array( 'key' => 'uupd_parent_license_id', 'compare' => 'NOT EXISTS' ),
+                ),
+            ) );
+        }
+        $new_license_ids = array();
+        $base_date = rup_gateway_fc_get_object_value( $order, array( 'created_at', 'createdAt', 'date_created' ), '' );
 
-        rup_gateway_fc_debug_log( array(
-            'mapping_selected_for_item' => array(
-                'order_id'        => $order_id,
-                'order_item_id'   => $order_item_id,
-                'subscription_id' => $subscription_id,
-                'candidate_ids'   => $candidate_ids,
-                'fluent_product_id'   => $product_id,
-                'fluent_variation_id' => $variation_id,
-                'quantity'        => $quantity,
-                'mapping'         => array( 'id' => $mapping->id, 'price_id' => $mapping->price_id, 'download_id' => $mapping->download_id ),
-                'expiry_date'     => $expiry_date,
-            ),
-        ) );
-
-        for ( $i = 1; $i <= $quantity; $i++ ) {
-            $provider_context = array(
-                'order_id'            => $order_id,
-                'order_item_id'       => $order_item_id,
-                'subscription_id'     => $subscription_id,
-                'mapping_id'          => absint( $mapping->id ),
-                'quantity_index'      => $i,
-                'fluent_product_id'   => $product_id,
-                'fluent_variation_id' => $variation_id,
-            );
-
-            $response = rup_gateway_fc_provider_create_license( $mapping, $user_id, $expiry_date, $provider_context );
-
-            $license_id = rup_gateway_fc_extract_license_id_from_response( $response );
-            $license_key = '';
-            if ( is_array( $response ) && ! empty( $response['license_key'] ) ) {
-                $license_key = sanitize_text_field( $response['license_key'] );
-            } elseif ( $license_id ) {
-                $license_key = sanitize_text_field( rup_gateway_fc_provider_get_license_key( $license_id ) );
+        foreach ( $items as $item ) {
+            $mapping = rup_gateway_fc_find_mapping_for_item( $item );
+            if ( ! $mapping ) {
+                continue;
             }
+            $order_item_id = rup_gateway_fc_get_order_item_id( $item );
+            if ( ! $order_item_id ) {
+                rup_gateway_fc_alert_order_issue( $order_id, 'item', 'Mapped item has no stable order item ID.' );
+                continue;
+            }
+            $quantity = max( 1, absint( rup_gateway_fc_get_object_value( $item, array( 'quantity', 'qty' ), 1 ) ) );
+            $subscription_id = rup_gateway_fc_get_subscription_id_for_order_item( $order, $item, $mapping, $data );
+            $subscription = $subscription_id ? rup_gateway_fc_get_table_row_by_id( 'fct_subscriptions', $subscription_id ) : null;
+            $expiry_date = $subscription ? rup_gateway_fc_get_subscription_expiry_from_row( $subscription ) : rup_gateway_fc_calculate_expiry_date( $mapping, $base_date );
+            list( $product_id, $variation_id ) = rup_gateway_fc_get_exact_item_product_variation_ids( $item, $mapping, $subscription );
 
-            rup_gateway_fc_debug_log( array( 'license_provider_create_response' => $response, 'provider' => rup_gateway_fc_get_license_provider(), 'order_id' => $order_id, 'mapping_id' => $mapping->id, 'license_id' => $license_id ) );
+            for ( $i = 1; $i <= $quantity; $i++ ) {
+                $slot = $order_item_id . ':' . absint( $mapping->id ) . ':' . $i;
+                $criteria = array( 'order_id' => $order_id, 'order_item_id' => $order_item_id, 'mapping_id' => absint( $mapping->id ), 'quantity_index' => $i );
+                $links = rup_gateway_fc_get_license_links( $criteria );
+                if ( $links ) {
+                    if ( count( $links ) > 1 ) {
+                        rup_gateway_fc_alert_order_issue( $order_id, $slot, 'Multiple licence links already exist for this item slot.' );
+                    }
+                    continue;
+                }
+                $state = isset( $states[ $slot ] ) ? $states[ $slot ] : array();
+                if ( $legacy_processed && ! $state ) {
+                    rup_gateway_fc_alert_order_issue( $order_id, $slot, 'Legacy order was marked processed but has no licence link; manual review required.' );
+                    continue;
+                }
+                if ( ! $state && $preexisting_uupd_licenses ) {
+                    foreach ( $preexisting_uupd_licenses as $legacy_license_id ) {
+                        if ( absint( get_post_meta( $legacy_license_id, 'update_id', true ) ) === absint( $mapping->download_id ) ) {
+                            rup_gateway_fc_alert_order_issue( $order_id, $slot, 'UUPD has a licence for this order and product but no gateway link for this slot; manual review required.' );
+                            continue 2;
+                        }
+                    }
+                }
+                if ( in_array( $state['status'] ?? '', array( 'creating', 'failed', 'linked' ), true ) ) {
+                    rup_gateway_fc_alert_order_issue( $order_id, $slot, 'Previous issuance has an uncertain result; review provider records before retrying.' );
+                    continue;
+                }
 
-            if ( $license_id ) {
-                rup_gateway_fc_insert_license_link( array(
-                    'order_id'            => $order_id,
-                    'order_item_id'       => $order_item_id,
-                    'subscription_id'     => $subscription_id,
-                    'user_id'             => $user_id,
-                    'customer_email'      => $email,
-                    'mapping_id'          => absint( $mapping->id ),
-                    'download_id'         => absint( $mapping->download_id ),
-                    'license_id'          => $license_id,
-                    'quantity_index'      => $i,
-                    'fluent_product_id'   => $product_id,
-                    'fluent_variation_id' => $variation_id,
-                ) );
+                $context = array( 'order_id' => $order_id, 'order_item_id' => $order_item_id, 'subscription_id' => $subscription_id, 'mapping_id' => absint( $mapping->id ), 'quantity_index' => $i, 'fluent_product_id' => $product_id, 'fluent_variation_id' => $variation_id );
+                $license_id = absint( $state['license_id'] ?? 0 );
+                if ( $license_id && ! get_post( $license_id ) ) {
+                    rup_gateway_fc_alert_order_issue( $order_id, $slot, 'Recovery licence no longer exists; manual review required.' );
+                    continue;
+                }
+                $license_key = '';
+                if ( ! $license_id ) {
+                    $states[ $slot ] = array( 'status' => 'creating', 'started' => time() );
+                    if ( ! update_option( $state_key, $states, false ) ) {
+                        rup_gateway_fc_alert_order_issue( $order_id, $slot, 'Could not save the pre-issuance recovery record; no licence was requested.' );
+                        continue;
+                    }
+                    try {
+                        $response = rup_gateway_fc_provider_create_license( $mapping, $user_id, $expiry_date, $context );
+                    } catch ( Throwable $e ) {
+                        rup_gateway_fc_alert_order_issue( $order_id, $slot, 'Licence provider threw an exception; outcome is uncertain and requires manual review.' );
+                        continue;
+                    }
+                    $license_id = rup_gateway_fc_extract_license_id_from_response( $response );
+                    if ( ! $license_id ) {
+                        $states[ $slot ] = array( 'status' => 'failed', 'started' => time() );
+                        update_option( $state_key, $states, false );
+                        rup_gateway_fc_alert_order_issue( $order_id, $slot, 'Licence provider returned no licence ID; manual review required.' );
+                        continue;
+                    }
+                    $license_key = is_array( $response ) && ! empty( $response['license_key'] ) ? sanitize_text_field( $response['license_key'] ) : '';
+                    $states[ $slot ] = array( 'status' => 'created', 'license_id' => $license_id );
+                    update_option( $state_key, $states, false );
+                }
+                if ( ! $license_key ) {
+                    $license_key = sanitize_text_field( rup_gateway_fc_provider_get_license_key( $license_id ) );
+                }
+                $linked = rup_gateway_fc_insert_license_link( array_merge( $context, array( 'user_id' => $user_id, 'customer_email' => $email, 'download_id' => absint( $mapping->download_id ), 'license_id' => $license_id ) ) );
+                if ( ! $linked ) {
+                    rup_gateway_fc_alert_order_issue( $order_id, $slot, 'Licence was created but its gateway link could not be saved; a retry will relink it.' );
+                    continue;
+                }
+                $states[ $slot ] = array( 'status' => 'linked', 'license_id' => $license_id );
+                update_option( $state_key, $states, false );
                 rup_gateway_fc_update_fluentcart_order_item_license_meta( $order_item_id, $license_id, $license_key );
+                if ( function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() && $subscription_id ) {
+                    update_post_meta( $license_id, 'subscription_id', $subscription_id );
+                }
+                rup_gateway_fc_record_license_event( $license_id, 'order_linked', array( 'order_id' => $order_id, 'subscription_id' => $subscription_id, 'source' => 'fluentcart' ) );
+                $new_license_ids[] = $license_id;
             }
         }
-    }
 
-    if ( $order_id ) {
-        $processed_orders[] = $order_id;
-        $processed_orders = array_slice( array_values( array_unique( array_map( 'absint', $processed_orders ) ) ), -500 );
-        update_option( 'rup_gateway_fc_processed_orders', $processed_orders, false );
-    }
-
-    $new_license_ids = array_diff( rup_gateway_fc_get_user_license_ids( $user_id ), $existing_license_ids );
-    rup_gateway_fc_debug_log( array( 'new_licenses_for_receipt_injection' => array_values( $new_license_ids ), 'buyer_email' => $email ) );
-
-    if ( $email && $order_id && ! empty( $new_license_ids ) ) {
-        rup_gateway_fc_set_recent_receipt_injection_context( $email, $order_id, array_values( $new_license_ids ) );
+        if ( $email && $new_license_ids ) {
+            rup_gateway_fc_set_recent_receipt_injection_context( $email, $order_id, $new_license_ids );
+        }
+    } finally {
+        $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock_name ) );
     }
 }
 
@@ -1021,6 +1151,7 @@ function rup_gateway_fc_expire_licenses_for_order( $order, $customer = null, $re
                 'expiry_date' => current_time( 'Y-m-d' ),
             ), array( 'reason' => $reason, 'order_id' => $order_id, 'link_id' => absint( $link->id ) ) );
             rup_gateway_fc_debug_log( array( 'linked_license_expired' => $response, 'provider' => rup_gateway_fc_get_license_provider(), 'license_id' => absint( $link->license_id ), 'link_id' => absint( $link->id ), 'order_id' => $order_id, 'reason' => $reason ) );
+            rup_gateway_fc_record_license_event( $link->license_id, 'expired', array( 'order_id' => $order_id, 'subscription_id' => $link->subscription_id, 'reason' => $reason, 'result' => is_wp_error( $response ) ? 'failed' : 'updated', 'source' => 'fluentcart' ) );
         }
         return;
     }

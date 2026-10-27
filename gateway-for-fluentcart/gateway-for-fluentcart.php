@@ -3,11 +3,15 @@
 * Plugin Name:       Licence Gateway For FluentCart
 * Plugin URI:        https://reallyusefulplugins.com/plugins/hoster-api
 * Description:       Adds FluentCart Intergration to UUPD Server & Hoster including customer portal, outbound emails for Licence Sales.
-* Version:           0.9
+* Version:           1.0.0
 * Author:            ReallyUsefulPlugins.com
 * Author URI: https://Reallyusefulplugins.com
 * Text Domain:       gateway-for-fluentcart
 */
+
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
 
 /**
  * Default FluentCart dashboard licence icon.
@@ -76,8 +80,9 @@ function rup_gateway_fc_sanitize_svg_icon( $svg ) {
 function rup_gateway_fc_get_default_options() {
     return array(
         'debug_enabled'                    => 0,
+        'license_history_enabled'          => 0,
         'gateway_provider_mode'            => 'auto',
-        'debug_log_name'                   => 'fc-gateway-debug.log',
+        'failure_alert_email'              => get_option( 'admin_email', '' ),
         'hoster_admin_improvements_enabled'       => 0,
         'auto_inject_receipt_licenses'     => 1,
         'add_licence_dashboard_tab'        => 1,
@@ -204,6 +209,9 @@ function rup_gateway_fc_provider_create_license( $mapping, $user_id, $expiry_dat
             'activation_limit' => ! empty( $mapping->enable_activation_limit ) ? absint( $mapping->activation_limit ) : 0,
             'expiry'           => (string) $expiry_date,
             'order_id'         => isset( $context['order_id'] ) ? (string) absint( $context['order_id'] ) : '',
+            'allow_rotate'     => isset( $mapping->uupd_allow_rotate ) && -1 !== (int) $mapping->uupd_allow_rotate ? (string) $mapping->uupd_allow_rotate : null,
+            'allow_children'   => isset( $mapping->uupd_allow_children ) && -1 !== (int) $mapping->uupd_allow_children ? (string) $mapping->uupd_allow_children : null,
+            'max_children'     => isset( $mapping->uupd_max_children ) && -1 !== (int) $mapping->uupd_max_children ? (int) $mapping->uupd_max_children : null,
         ) );
 
         $response = rup_gateway_fc_normalize_provider_response( $response );
@@ -211,6 +219,10 @@ function rup_gateway_fc_provider_create_license( $mapping, $user_id, $expiry_dat
         $license_id = 0;
         if ( is_array( $response ) && ! empty( $response['license_id'] ) ) {
             $license_id = absint( $response['license_id'] );
+        }
+
+        if ( $license_id && ! empty( $context['subscription_id'] ) ) {
+            update_post_meta( $license_id, 'subscription_id', absint( $context['subscription_id'] ) );
         }
 
         if ( $license_id && ! empty( $mapping->status ) && 'active' !== sanitize_key( $mapping->status ) ) {
@@ -288,6 +300,13 @@ function rup_gateway_fc_get_license_user_ids_query_args( $user_id, $download_id 
         );
     }
 
+    if ( 'uupd' === $provider ) {
+        $args['meta_query'][] = array(
+            'key' => 'uupd_parent_license_id',
+            'compare' => 'NOT EXISTS',
+        );
+    }
+
     return $args;
 }
 
@@ -338,6 +357,12 @@ function rup_gateway_fc_provider_get_license_download_url( $product_id, $license
         }
 
         return '';
+    }
+
+    // Hoster 1.4 can store packages privately with no download_url meta. Its
+    // button endpoint checks the current customer's licence on each click.
+    if ( function_exists( 'hoster_download_button_url' ) ) {
+        return esc_url_raw( hoster_download_button_url( $product_id ) );
     }
 
     if ( function_exists( 'rup_gateway_fc_generate_secure_download_link' ) ) {
@@ -499,18 +524,13 @@ function rup_gateway_fc_sanitize_options( $input ) {
     }
 
     $gateway_provider_mode = in_array( sanitize_key( $input['gateway_provider_mode'] ?? 'auto' ), array( 'auto', 'hoster', 'uupd' ), true ) ? sanitize_key( $input['gateway_provider_mode'] ?? 'auto' ) : 'auto';
-    $hoster_admin_improvements_enabled = 0;
-
-    if ( isset( $input['hoster_admin_improvements_enabled'] ) && rup_gateway_fc_is_hoster_available() ) {
-        if ( 'hoster' === $gateway_provider_mode || ( 'auto' === $gateway_provider_mode && 'hoster' === rup_gateway_fc_get_license_provider() ) ) {
-            $hoster_admin_improvements_enabled = 1;
-        }
-    }
+    $hoster_admin_improvements_enabled = isset( $input['hoster_admin_improvements_enabled'] ) ? 1 : 0;
 
     return array(
         'debug_enabled'                    => isset( $input['debug_enabled'] ) ? 1 : 0,
+        'license_history_enabled'          => isset( $input['license_history_enabled'] ) ? 1 : 0,
         'gateway_provider_mode'            => $gateway_provider_mode,
-        'debug_log_name'                   => sanitize_file_name( $input['debug_log_name'] ?? 'fc-gateway-debug.log' ),
+        'failure_alert_email'              => sanitize_email( $input['failure_alert_email'] ?? '' ),
         'hoster_admin_improvements_enabled'       => $hoster_admin_improvements_enabled,
         'auto_inject_receipt_licenses'     => isset( $input['auto_inject_receipt_licenses'] ) ? 1 : 0,
         'add_licence_dashboard_tab'        => isset( $input['add_licence_dashboard_tab'] ) ? 1 : 0,
@@ -531,11 +551,10 @@ require 'gateway.php'; // Gateway Processing
 require 'downloads.php'; // Secure Downloads
 require 'hoster-admin-changes.php'; // Admin Improvements
 
-if ( ! defined( 'ABSPATH' ) ) {
-    exit; // Exit if accessed directly.
+// Activation hooks do not run during an ordinary plugin update.
+if ( ! get_option( 'rup_gateway_fc_debug_log_state' ) ) {
+    rup_gateway_fc_get_debug_log_path();
 }
-
-
 
 class Rup_Gateway_FC_Gateway {
 
@@ -561,10 +580,23 @@ class Rup_Gateway_FC_Gateway {
 
         // Admin menu and form processing.
         add_action( 'admin_menu', array( $this, 'rup_gateway_fc_admin_menu' ), 99 );
+        add_action( 'admin_enqueue_scripts', array( $this, 'rup_gateway_fc_enqueue_admin_styles' ) );
+        add_action( 'admin_footer', array( $this, 'enqueue_fluentcart_license_panel' ) );
+        add_action( 'wp_ajax_rup_gateway_fc_admin_license_links', array( $this, 'admin_license_links' ) );
+        add_action( 'add_meta_boxes', array( $this, 'register_hoster_history_box' ) );
+        add_filter( 'manage_edit-uupd_license_columns', array( $this, 'add_uupd_subscription_column' ), 20 );
+        add_action( 'manage_uupd_license_posts_custom_column', array( $this, 'render_uupd_subscription_column' ), 20, 2 );
+        add_action( 'restrict_manage_posts', array( $this, 'render_uupd_subscription_filter' ), 20, 2 );
+        add_action( 'pre_get_posts', array( $this, 'prepare_uupd_subscription_filter' ) );
+        add_filter( 'posts_where', array( $this, 'apply_uupd_subscription_filter' ), 10, 2 );
+        add_filter( 'uupd_license_order_reference_html', array( $this, 'link_uupd_order_reference' ), 10, 3 );
+        add_action( 'add_meta_boxes_uupd_license', array( $this, 'register_uupd_purchase_box' ) );
         add_action( 'admin_post_rup_gateway_fc_save_mapping', array( $this, 'rup_gateway_fc_save_mapping' ) );
         add_action( 'admin_post_rup_gateway_fc_delete_mapping', array( $this, 'rup_gateway_fc_delete_mapping' ) );
         add_action( 'admin_post_rup_gateway_fc_undo_mapping', array( $this, 'rup_gateway_fc_undo_mapping' ) );
         add_action( 'admin_post_rup_gateway_fc_save_settings', array( $this, 'rup_gateway_fc_save_settings' ) );
+        add_action( 'admin_post_rup_gateway_fc_view_debug_log', array( $this, 'rup_gateway_fc_view_debug_log' ) );
+        add_action( 'admin_post_rup_gateway_fc_test_debug_log', array( $this, 'rup_gateway_fc_test_debug_log' ) );
         add_action( 'admin_post_rup_gateway_fc_simulate_renewal', array( $this, 'rup_gateway_fc_simulate_renewal' ) );
         add_action( 'init', array( $this, 'rup_gateway_fc_register_customer_dashboard_tab' ), 20 );
         add_filter( 'fluent_cart/global_customer_menu_items', array( $this, 'rup_gateway_fc_reorder_customer_dashboard_tab' ), 20 );
@@ -575,6 +607,7 @@ class Rup_Gateway_FC_Gateway {
      * Creates the custom database table to store mapping records.
      */
     public function rup_gateway_fc_install() {
+        rup_gateway_fc_get_debug_log_path();
         global $wpdb;
         $charset_collate = $wpdb->get_charset_collate();
         $sql = "CREATE TABLE $this->table_name (
@@ -588,6 +621,9 @@ class Rup_Gateway_FC_Gateway {
             lifetime TINYINT(1) NOT NULL DEFAULT 0,
             expiry_duration INT NOT NULL DEFAULT 0,
             expiry_unit VARCHAR(20) NOT NULL DEFAULT 'Days',
+            uupd_allow_rotate TINYINT(1) NOT NULL DEFAULT -1,
+            uupd_allow_children TINYINT(1) NOT NULL DEFAULT -1,
+            uupd_max_children SMALLINT NOT NULL DEFAULT -1,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (id)
         ) $charset_collate;";
@@ -636,6 +672,14 @@ class Rup_Gateway_FC_Gateway {
         $column = $wpdb->get_results( "SHOW COLUMNS FROM $table LIKE 'friendly_name'" );
         if ( empty( $column ) ) {
             $wpdb->query( "ALTER TABLE $table ADD friendly_name VARCHAR(255) NOT NULL DEFAULT '' AFTER id" );
+        }
+        foreach ( array( 'uupd_allow_rotate' => -1, 'uupd_allow_children' => -1 ) as $name => $default ) {
+            if ( ! $wpdb->get_results( "SHOW COLUMNS FROM $table LIKE '" . esc_sql( $name ) . "'" ) ) {
+                $wpdb->query( "ALTER TABLE $table ADD $name TINYINT(1) NOT NULL DEFAULT $default" );
+            }
+        }
+        if ( ! $wpdb->get_results( "SHOW COLUMNS FROM $table LIKE 'uupd_max_children'" ) ) {
+            $wpdb->query( "ALTER TABLE $table ADD uupd_max_children SMALLINT NOT NULL DEFAULT -1" );
         }
 
         $links_table = $wpdb->prefix . 'rup_gateway_fc_license_links';
@@ -803,6 +847,205 @@ class Rup_Gateway_FC_Gateway {
         }
     }
 
+    public function rup_gateway_fc_enqueue_admin_styles() {
+        if ( ! isset( $_GET['page'] ) || 'rup-gateway-fc' !== sanitize_key( wp_unslash( $_GET['page'] ) ) ) { return; }
+        wp_enqueue_style( 'rup-gateway-fc-admin', plugin_dir_url( __FILE__ ) . 'css/admin-mappings.css', array(), filemtime( plugin_dir_path( __FILE__ ) . 'css/admin-mappings.css' ) );
+    }
+
+    /** Load after FluentCart has rendered its admin wrapper. */
+    public function enqueue_fluentcart_license_panel() {
+        if ( ! isset( $_GET['page'] ) || 'fluent-cart' !== sanitize_key( wp_unslash( $_GET['page'] ) ) || ! current_user_can( 'manage_options' ) ) {
+            return;
+        }
+        $config = array( 'url' => admin_url( 'admin-ajax.php' ), 'adminPage' => admin_url( 'admin.php?page=fluent-cart' ), 'nonce' => wp_create_nonce( 'rup_gateway_fc_admin_links' ) );
+        $src = add_query_arg( 'ver', filemtime( plugin_dir_path( __FILE__ ) . 'js/admin-license-links.js' ), plugin_dir_url( __FILE__ ) . 'js/admin-license-links.js' );
+        echo '<script>window.rupGatewayAdminLinks = ' . wp_json_encode( $config ) . ';</script>';
+        echo '<script src="' . esc_url( $src ) . '"></script>';
+    }
+
+    public function admin_license_links() {
+        check_ajax_referer( 'rup_gateway_fc_admin_links', 'nonce' );
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( array( 'message' => 'Forbidden' ), 403 );
+        }
+        $type = isset( $_GET['type'] ) ? sanitize_key( wp_unslash( $_GET['type'] ) ) : '';
+        $id = isset( $_GET['id'] ) ? absint( $_GET['id'] ) : 0;
+        if ( ! $id || ! in_array( $type, array( 'order', 'subscription' ), true ) ) {
+            wp_send_json_error( array( 'message' => 'Invalid view' ), 400 );
+        }
+        $rows = rup_gateway_fc_get_license_links( array( $type . '_id' => $id ) );
+        $items = array();
+        foreach ( $rows as $row ) {
+            $license_id = absint( $row->license_id );
+            $post = get_post( $license_id );
+            if ( ! $post || ! in_array( $post->post_type, array( 'uupd_license', 'hoster_license' ), true ) ) {
+                continue;
+            }
+            $items[] = array(
+                'id' => $license_id,
+                'key' => (string) get_post_meta( $license_id, 'license_key', true ),
+                'status' => (string) get_post_meta( $license_id, 'status', true ),
+                'orderId' => absint( $row->order_id ),
+                'subscriptionId' => absint( $row->subscription_id ),
+                'url' => get_edit_post_link( $license_id, 'raw' ),
+            );
+        }
+        wp_send_json_success( $items );
+    }
+
+    public function register_hoster_history_box() {
+        if ( 'hoster' !== rup_gateway_fc_get_license_provider() ) {
+            return;
+        }
+        add_meta_box( 'rup_gateway_fc_history', 'Licence interactions', array( $this, 'render_hoster_history_box' ), 'hoster_license', 'normal' );
+    }
+
+    public function render_hoster_history_box( $post ) {
+        if ( empty( rup_gateway_fc_get_options()['license_history_enabled'] ) ) {
+            echo '<p>Enable licence interaction history in the Gateway settings to record events.</p>';
+            return;
+        }
+        $history = get_post_meta( $post->ID, '_uupd_interaction_history', true );
+        $history = is_array( $history ) ? array_reverse( $history ) : array();
+        echo '<details><summary>View logs</summary>';
+        if ( ! $history ) {
+            echo '<p>No interactions recorded yet.</p>';
+        } else {
+            echo '<ol>';
+            foreach ( $history as $entry ) {
+                echo '<li><strong>' . esc_html( $entry['at'] ?? '' ) . ' — ' . esc_html( $entry['event'] ?? '' ) . '</strong>: ' . esc_html( wp_json_encode( $entry['details'] ?? array() ) ) . '</li>';
+            }
+            echo '</ol>';
+        }
+        echo '</details>';
+    }
+
+    /** FluentCart-specific UUPD admin extensions are owned by the Gateway. */
+    private function uupd_admin_integration_active() {
+        return 'uupd' === rup_gateway_fc_get_license_provider() && function_exists( 'uupd_create_license' ) && post_type_exists( 'uupd_license' );
+    }
+
+    private function get_uupd_gateway_link( $license_id ) {
+        static $cache = array();
+        static $table_exists = null;
+        $license_id = absint( $license_id );
+        if ( array_key_exists( $license_id, $cache ) ) {
+            return $cache[ $license_id ];
+        }
+        $cache[ $license_id ] = null;
+        if ( ! $license_id || ! $this->uupd_admin_integration_active() ) {
+            return null;
+        }
+        global $wpdb;
+        $table = rup_gateway_fc_get_license_links_table();
+        if ( null === $table_exists ) {
+            $table_exists = rup_gateway_fc_table_exists( $table );
+        }
+        if ( ! $table_exists ) {
+            return null;
+        }
+        $cache[ $license_id ] = $wpdb->get_row( $wpdb->prepare( "SELECT order_id, subscription_id FROM {$table} WHERE license_id = %d ORDER BY (subscription_id > 0) DESC, id DESC LIMIT 1", $license_id ) );
+        return $cache[ $license_id ];
+    }
+
+    private function fluentcart_admin_reference_html( $type, $id ) {
+        $id = absint( $id );
+        $path = 'order' === $type ? 'orders' : 'subscriptions';
+        $label = 'order' === $type ? __( 'View FluentCart order', 'gateway-for-fluentcart' ) : __( 'View FluentCart subscription', 'gateway-for-fluentcart' );
+        $url = admin_url( 'admin.php?page=fluent-cart' ) . '#/' . $path . '/' . $id . '/view';
+        return sprintf( '<a href="%s" aria-label="%s">%s <span class="dashicons dashicons-external" aria-hidden="true" style="font-size:14px;width:14px;height:14px;vertical-align:middle"></span></a>', esc_url( $url ), esc_attr( $label ), esc_html( $id ) );
+    }
+
+    public function add_uupd_subscription_column( $columns ) {
+        if ( ! $this->uupd_admin_integration_active() ) {
+            return $columns;
+        }
+        $result = array();
+        foreach ( $columns as $key => $label ) {
+            $result[ $key ] = $label;
+            if ( 'uupd_order_id' === $key ) {
+                $result['rup_gateway_fc_subscription_id'] = __( 'Subscription', 'gateway-for-fluentcart' );
+            }
+        }
+        return $result;
+    }
+
+    public function render_uupd_subscription_filter( $post_type, $which = 'top' ) {
+        if ( 'uupd_license' !== $post_type || 'top' !== $which || ! $this->uupd_admin_integration_active() ) {
+            return;
+        }
+        $id = isset( $_GET['rup_gateway_fc_subscription'] ) ? absint( $_GET['rup_gateway_fc_subscription'] ) : 0;
+        printf( '<label class="screen-reader-text" for="rup-gateway-fc-subscription-filter">%s</label><input id="rup-gateway-fc-subscription-filter" type="number" min="1" name="rup_gateway_fc_subscription" value="%s" placeholder="%s">', esc_html__( 'Subscription ID', 'gateway-for-fluentcart' ), $id ? esc_attr( $id ) : '', esc_attr__( 'Subscription ID', 'gateway-for-fluentcart' ) );
+    }
+
+    public function prepare_uupd_subscription_filter( $query ) {
+        if ( ! is_admin() || ! $query->is_main_query() || 'uupd_license' !== $query->get( 'post_type' ) || ! $this->uupd_admin_integration_active() ) {
+            return;
+        }
+        $id = isset( $_GET['rup_gateway_fc_subscription'] ) ? absint( $_GET['rup_gateway_fc_subscription'] ) : 0;
+        if ( $id ) {
+            $query->set( 'rup_gateway_fc_subscription_filter', $id );
+        }
+    }
+
+    public function apply_uupd_subscription_filter( $where, $query ) {
+        $id = absint( $query->get( 'rup_gateway_fc_subscription_filter' ) );
+        if ( ! $id || ! is_admin() || ! $query->is_main_query() || 'uupd_license' !== $query->get( 'post_type' ) || ! $this->uupd_admin_integration_active() ) {
+            return $where;
+        }
+        global $wpdb;
+        $matches = $wpdb->prepare( "EXISTS (SELECT 1 FROM {$wpdb->postmeta} AS rup_sub_meta WHERE rup_sub_meta.post_id = {$wpdb->posts}.ID AND rup_sub_meta.meta_key = 'subscription_id' AND rup_sub_meta.meta_value = %d)", $id );
+        $table = rup_gateway_fc_get_license_links_table();
+        if ( rup_gateway_fc_table_exists( $table ) ) {
+            $matches .= $wpdb->prepare( " OR EXISTS (SELECT 1 FROM {$table} AS rup_sub_link WHERE rup_sub_link.license_id = {$wpdb->posts}.ID AND rup_sub_link.subscription_id = %d)", $id );
+        }
+        return $where . ' AND (' . $matches . ')';
+    }
+
+    public function render_uupd_subscription_column( $column, $license_id ) {
+        if ( 'rup_gateway_fc_subscription_id' !== $column || ! $this->uupd_admin_integration_active() ) {
+            return;
+        }
+        $link = $this->get_uupd_gateway_link( $license_id );
+        $subscription_id = absint( get_post_meta( $license_id, 'subscription_id', true ) );
+        if ( ! $subscription_id && $link ) {
+            $subscription_id = absint( $link->subscription_id );
+        }
+        if ( ! $subscription_id ) {
+            echo '&mdash;';
+        } elseif ( $link && $subscription_id === absint( $link->subscription_id ) && current_user_can( 'manage_options' ) ) {
+            echo wp_kses_post( $this->fluentcart_admin_reference_html( 'subscription', $subscription_id ) );
+        } else {
+            echo esc_html( $subscription_id );
+        }
+    }
+
+    public function link_uupd_order_reference( $html, $license_id, $order_id ) {
+        if ( ! $this->uupd_admin_integration_active() || ! current_user_can( 'manage_options' ) || ! ctype_digit( (string) $order_id ) ) {
+            return $html;
+        }
+        $link = $this->get_uupd_gateway_link( $license_id );
+        return $link && absint( $order_id ) === absint( $link->order_id ) ? $this->fluentcart_admin_reference_html( 'order', $link->order_id ) : $html;
+    }
+
+    public function register_uupd_purchase_box() {
+        if ( $this->uupd_admin_integration_active() ) {
+            add_meta_box( 'rup_gateway_fc_uupd_purchase', __( 'FluentCart purchase', 'gateway-for-fluentcart' ), array( $this, 'render_uupd_purchase_box' ), 'uupd_license', 'side' );
+        }
+    }
+
+    public function render_uupd_purchase_box( $post ) {
+        $link = $this->get_uupd_gateway_link( $post->ID );
+        if ( ! $link ) {
+            echo '<p>' . esc_html__( 'No Gateway purchase link found.', 'gateway-for-fluentcart' ) . '</p>';
+            return;
+        }
+        echo '<p><strong>' . esc_html__( 'Order', 'gateway-for-fluentcart' ) . '</strong><br>' . wp_kses_post( $this->fluentcart_admin_reference_html( 'order', $link->order_id ) ) . '</p>';
+        if ( ! empty( $link->subscription_id ) ) {
+            echo '<p><strong>' . esc_html__( 'Subscription', 'gateway-for-fluentcart' ) . '</strong><br>' . wp_kses_post( $this->fluentcart_admin_reference_html( 'subscription', $link->subscription_id ) ) . '</p>';
+        }
+    }
+
 
     /**
      * Returns published Hoster downloads for mapping selectors.
@@ -947,6 +1190,9 @@ class Rup_Gateway_FC_Gateway {
             'lifetime'                => 0,
             'expiry_duration'         => '',
             'expiry_unit'             => 'Days',
+            'uupd_allow_rotate'       => -1,
+            'uupd_allow_children'     => -1,
+            'uupd_max_children'       => -1,
         );
         if ( isset( $_GET['mapping_id'] ) && ! empty( $_GET['mapping_id'] ) ) {
             $is_edit = true;
@@ -960,15 +1206,15 @@ class Rup_Gateway_FC_Gateway {
         $download_choices = $this->rup_gateway_fc_get_download_choices();
         $fluent_product_choices = $this->rup_gateway_fc_get_fluent_product_choices();
         ?>
-        <div class="wrap">
-            <h1><?php echo $is_edit ? 'Edit' : 'Add'; ?> Mapping</h1>
-            <form method="post" action="<?php echo admin_url( 'admin-post.php' ); ?>">
+        <div class="wrap rup-map-admin rup-map-editor">
+            <div class="rup-map-page-heading"><div><span class="rup-map-eyebrow">FluentCart Licence Gateway</span><h1><?php echo $is_edit ? 'Edit mapping' : 'Add mapping'; ?></h1><p>Connect a FluentCart purchase to a licence product and choose how new licences are issued.</p></div><a class="button" href="<?php echo esc_url( admin_url( 'admin.php?page=rup-gateway-fc' ) ); ?>">Back to mappings</a></div>
+            <form class="rup-map-form" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
                 <?php wp_nonce_field( 'rup_gateway_fc_save_mapping_nonce' ); ?>
                 <input type="hidden" name="action" value="rup_gateway_fc_save_mapping">
                 <?php if ( $is_edit ) : ?>
                     <input type="hidden" name="mapping_id" value="<?php echo esc_attr( $mapping['id'] ); ?>">
                 <?php endif; ?>
-                <table class="form-table">
+                <section class="rup-map-panel"><div class="rup-map-panel__heading"><span class="rup-map-eyebrow">01 · Product link</span><h2>What purchase issues which licence?</h2><p>Choose the FluentCart product or variation and the matching licence product.</p></div><table class="form-table">
                     <tr>
                         <th scope="row"><label for="friendly_name">Friendly Name</label></th>
                         <td>
@@ -985,7 +1231,7 @@ class Rup_Gateway_FC_Gateway {
                                     <option value="<?php echo esc_attr( $choice['id'] ); ?>" label="<?php echo esc_attr( $choice['label'] ); ?>"><?php echo esc_html( $choice['label'] ); ?></option>
                                 <?php endforeach; ?>
                             </datalist>
-                            <p class="description">Start typing to search FluentCart products and variations. Variations are loaded from <code><?php global $wpdb; echo esc_html( $wpdb->prefix . 'fct_product_variations' ); ?></code>; products are loaded from the <code>fluent-products</code> post type.</p>
+                            <p class="description">Start typing a product or variation name, then select its ID from the suggestions.</p>
                             <?php if ( ! empty( $mapping['price_id'] ) ) : ?>
                                 <p class="description">Current selection: <?php echo esc_html( $this->rup_gateway_fc_get_fluent_product_label( $mapping['price_id'] ) ); ?></p>
                             <?php endif; ?>
@@ -1000,12 +1246,14 @@ class Rup_Gateway_FC_Gateway {
                                     <option value="<?php echo esc_attr( $choice['id'] ); ?>" label="<?php echo esc_attr( $choice['label'] ); ?>"><?php echo esc_html( $choice['label'] ); ?></option>
                                 <?php endforeach; ?>
                             </datalist>
-                            <p class="description">Start typing to search available <?php echo ( function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() ) ? 'UUPD updates from the <code>update</code> post type' : 'Hoster downloads from the <code>downloads</code> post type'; ?>.</p>
+                            <p class="description">Start typing to find the matching <?php echo ( function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() ) ? 'UUPD update' : 'Hoster download'; ?>.</p>
                             <?php if ( ! empty( $mapping['download_id'] ) ) : ?>
                                 <p class="description">Current selection: <?php echo esc_html( $this->rup_gateway_fc_get_download_label( $mapping['download_id'] ) ); ?></p>
                             <?php endif; ?>
                         </td>
                     </tr>
+                </table></section>
+                <section class="rup-map-panel"><div class="rup-map-panel__heading"><span class="rup-map-eyebrow">02 · Licence terms</span><h2>Licence issued to the customer</h2><p>Set its initial status, activation allowance and expiry.</p></div><table class="form-table">
                     <tr>
                         <th scope="row"><label for="status">Status</label></th>
                         <td>
@@ -1046,10 +1294,16 @@ class Rup_Gateway_FC_Gateway {
                             </span>
                         </td>
                     </tr>
-                </table>
-                <?php submit_button( $is_edit ? 'Update Mapping' : 'Add Mapping' ); ?>
+                </table></section>
+                <?php if ( function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() && function_exists( 'uupd_create_license' ) ) : ?>
+                <section class="rup-map-panel rup-map-uupd"><div class="rup-map-panel__heading"><span class="rup-map-eyebrow">03 · UUPD customer controls</span><h2>Key and child licence permissions</h2><p>These settings apply to new UUPD licences. Administrators can manage keys regardless of customer permissions.</p></div><table class="form-table">
+                    <tr><th scope="row"><label for="uupd_allow_rotate">Customer key rotation</label></th><td><select name="uupd_allow_rotate" id="uupd_allow_rotate"><option value="-1" <?php selected( (int) $mapping['uupd_allow_rotate'], -1 ); ?>>Use UUPD default</option><option value="1" <?php selected( (int) $mapping['uupd_allow_rotate'], 1 ); ?>>Allow</option><option value="0" <?php selected( (int) $mapping['uupd_allow_rotate'], 0 ); ?>>Disallow</option></select><p class="description">Controls whether customers see Rotate key. Store administrators can still rotate keys.</p></td></tr>
+                    <tr><th scope="row"><label for="uupd_allow_children">Customer child keys</label></th><td><select name="uupd_allow_children" id="uupd_allow_children"><option value="-1" <?php selected( (int) $mapping['uupd_allow_children'], -1 ); ?>>Use UUPD default</option><option value="1" <?php selected( (int) $mapping['uupd_allow_children'], 1 ); ?>>Allow</option><option value="0" <?php selected( (int) $mapping['uupd_allow_children'], 0 ); ?>>Disallow</option></select><p class="description">Controls customer creation. Existing children of an issued licence are managed on that licence.</p></td></tr>
+                    <tr><th scope="row"><label for="uupd_max_children">Maximum child keys</label></th><td><input type="number" name="uupd_max_children" id="uupd_max_children" min="0" step="1" value="<?php echo esc_attr( (int) $mapping['uupd_max_children'] < 0 ? '' : (int) $mapping['uupd_max_children'] ); ?>" class="small-text"><p class="description">Leave blank to use the UUPD site default. A finite licence cannot have a child count higher than its activation limit.</p><label id="uupd-unlimited-children-wrap" class="rup-map-check"><input type="checkbox" name="uupd_unlimited_children" id="uupd_unlimited_children" value="1" <?php checked( (int) $mapping['uupd_max_children'], -2 ); ?>> Unlimited child keys when activations are unlimited</label><p class="description">Revoked child keys count until deleted.</p></td></tr>
+                </table></section>
+                <?php endif; ?>
+                <div class="rup-map-form__actions"><?php submit_button( $is_edit ? 'Update mapping' : 'Add mapping' ); ?><a href="<?php echo esc_url( admin_url( 'admin.php?page=rup-gateway-fc' ) ); ?>">Cancel</a></div>
             </form>
-            <p><a href="<?php echo admin_url( 'admin.php?page=rup-gateway-fc' ); ?>">&laquo; Back to list</a></p>
             <script>
                 // Toggle expiry fields when lifetime checkbox is toggled.
                 var lifetimeCheckbox = document.getElementById('lifetime');
@@ -1073,6 +1327,23 @@ class Rup_Gateway_FC_Gateway {
                 var activationCheckbox = document.getElementById('enable_activation_limit');
                 var activationLimitRow = document.getElementById('activation-limit-row');
                 var activationLimitInput = document.getElementById('activation_limit');
+                var childMaximumInput = document.getElementById('uupd_max_children');
+                var unlimitedChildrenWrap = document.getElementById('uupd-unlimited-children-wrap');
+                var unlimitedChildrenInput = document.getElementById('uupd_unlimited_children');
+                function syncChildMaximum() {
+                    if (!childMaximumInput) return;
+                    if (activationCheckbox.checked) {
+                        childMaximumInput.max = activationLimitInput.value || '';
+                        if (unlimitedChildrenInput) { unlimitedChildrenInput.checked = false; unlimitedChildrenWrap.style.display = 'none'; }
+                    } else {
+                        childMaximumInput.removeAttribute('max');
+                        if (unlimitedChildrenWrap) unlimitedChildrenWrap.style.display = '';
+                    }
+                    childMaximumInput.disabled = !!(unlimitedChildrenInput && unlimitedChildrenInput.checked);
+                }
+                if (unlimitedChildrenInput) unlimitedChildrenInput.addEventListener('change', syncChildMaximum);
+                activationLimitInput.addEventListener('input', syncChildMaximum);
+                syncChildMaximum();
 
                 activationCheckbox.addEventListener('change', function() {
                     if (this.checked) {
@@ -1085,12 +1356,12 @@ class Rup_Gateway_FC_Gateway {
                         activationLimitInput.removeAttribute('required');
                         activationLimitInput.value = "";
                     }
+                    syncChildMaximum();
                 });
 
                 // Confirm deletion with a type-to-delete prompt.
                 function confirmDelete() {
                     var confirmation = prompt("Type DELETE to confirm deletion of this mapping. This action cannot be undone.");
-                    console.log("confirmDelete() input: " + confirmation);
                     return (confirmation === "DELETE");
                 }
             </script>
@@ -1228,6 +1499,37 @@ class Rup_Gateway_FC_Gateway {
         exit;
     }
 
+    /** Serve the private log only to WordPress administrators. */
+    public function rup_gateway_fc_view_debug_log() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( 'Unauthorized user', '', array( 'response' => 403 ) );
+        }
+        check_admin_referer( 'rup_gateway_fc_view_debug_log' );
+        $path = rup_gateway_fc_get_debug_log_path();
+        if ( ! $path || ! is_file( $path ) || ! is_readable( $path ) ) {
+            wp_die( 'Gateway debug log is unavailable.', '', array( 'response' => 404 ) );
+        }
+        nocache_headers();
+        header( 'Content-Type: text/plain; charset=utf-8' );
+        header( 'Content-Disposition: inline; filename="' . basename( $path ) . '"' );
+        header( 'X-Content-Type-Options: nosniff' );
+        readfile( $path );
+        exit;
+    }
+
+    /** Let an administrator verify that the configured log accepts writes. */
+    public function rup_gateway_fc_test_debug_log() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( 'Unauthorized user', '', array( 'response' => 403 ) );
+        }
+        check_admin_referer( 'rup_gateway_fc_test_debug_log' );
+        if ( ! empty( rup_gateway_fc_get_options()['debug_enabled'] ) ) {
+            rup_gateway_fc_debug_log( 'Administrator requested a test log entry.' );
+        }
+        wp_safe_redirect( admin_url( 'admin.php?page=rup-gateway-fc&action=settings' ) );
+        exit;
+    }
+
     /**
      * Renders settings to replace wp-config constants.
      */
@@ -1262,16 +1564,31 @@ class Rup_Gateway_FC_Gateway {
                         <th scope="row"><label for="debug_enabled">Enable Debug Logging</label></th>
                         <td><input type="checkbox" id="debug_enabled" name="rup_gateway_fc_options[debug_enabled]" value="1" <?php checked( 1, $options['debug_enabled'] ); ?>></td>
                     </tr>
+                    <tr><th scope="row"><label for="license_history_enabled">Hoster licence interaction history</label></th><td><label><input type="checkbox" id="license_history_enabled" name="rup_gateway_fc_options[license_history_enabled]" value="1" <?php checked( 1, $options['license_history_enabled'] ); ?>> Keep the latest 20 Gateway events per Hoster licence</label><p class="description">Records issuance, renewals and expiry changes. UUPD licences use the separate history setting in UUPD Server.</p></td></tr>
                     <tr>
-                        <th scope="row"><label for="debug_log_name">Debug Log Filename</label></th>
-                        <td><input class="regular-text" id="debug_log_name" name="rup_gateway_fc_options[debug_log_name]" value="<?php echo esc_attr( $options['debug_log_name'] ); ?>"></td>
+                        <th scope="row">Debug Log</th>
+                        <td>
+                            <?php $debug_log_path = rup_gateway_fc_get_debug_log_path(); ?>
+                            <code><?php echo esc_html( $debug_log_path ?: 'Unavailable: the private log directory or file is not writable.' ); ?></code>
+                            <?php if ( $debug_log_path && is_readable( $debug_log_path ) ) : ?>
+                                <p><a class="button" target="_blank" rel="noopener noreferrer" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=rup_gateway_fc_view_debug_log' ), 'rup_gateway_fc_view_debug_log' ) ); ?>">View log</a> <span class="description"><?php echo esc_html( size_format( filesize( $debug_log_path ) ) ); ?></span></p>
+                            <?php endif; ?>
+                            <?php if ( ! empty( $options['debug_enabled'] ) ) : ?>
+                                <p><a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=rup_gateway_fc_test_debug_log' ), 'rup_gateway_fc_test_debug_log' ) ); ?>">Write test entry</a></p>
+                            <?php endif; ?>
+                            <p class="description">This is a server path outside the public web root, so it cannot be opened as a website URL. The log rotates every 7 days or at 5 MB.</p>
+                        </td>
                     </tr>
-                    <?php if ( function_exists( 'rup_gateway_fc_is_hoster_active_setup' ) && rup_gateway_fc_is_hoster_active_setup() ) : ?>
+                    <tr>
+                        <th scope="row"><label for="failure_alert_email">Gateway Failure Alert Email</label></th>
+                        <td><input type="email" class="regular-text" id="failure_alert_email" name="rup_gateway_fc_options[failure_alert_email]" value="<?php echo esc_attr( $options['failure_alert_email'] ); ?>"><p class="description">Receives at most one alert per issue each day. Leave empty to disable email alerts; failures are still recorded in the debug log when enabled.</p></td>
+                    </tr>
+                    <?php if ( rup_gateway_fc_is_hoster_available() ) : ?>
                     <tr>
                         <th scope="row"><label for="hoster_admin_improvements_enabled">Enable Hoster Admin Improvements</label></th>
                         <td>
                             <input type="checkbox" id="hoster_admin_improvements_enabled" name="rup_gateway_fc_options[hoster_admin_improvements_enabled]" value="1" <?php checked( 1, $options['hoster_admin_improvements_enabled'] ); ?>>
-                            <p class="description">Adds copyable IDs and extra Gateway licence/admin columns when Hoster is the active gateway provider.</p>
+                            <p class="description">Adds copyable IDs, purchase and subscription links, a live subscription column, and order, subscription, and expiry filters to Hoster licence admin. This works regardless of which provider Gateway uses for new licences. User and download filters remain supplied by Hoster.</p>
                         </td>
                     </tr>
                     <?php endif; ?>
@@ -1443,6 +1760,7 @@ class Rup_Gateway_FC_Gateway {
         $lifetime = isset( $_POST['lifetime'] ) ? 1 : 0;
         $expiry_duration = $lifetime ? 0 : intval( $_POST['expiry_duration'] );
         $expiry_unit = $lifetime ? 'Days' : sanitize_text_field( $_POST['expiry_unit'] );
+        $uupd_active = function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() && function_exists( 'uupd_create_license' );
 
         $data = array(
             'friendly_name'           => $friendly_name,
@@ -1455,13 +1773,29 @@ class Rup_Gateway_FC_Gateway {
             'expiry_duration'         => $expiry_duration,
             'expiry_unit'             => $expiry_unit,
         );
+        $formats = array( '%s', '%s', '%d', '%s', '%d', '%d', '%d', '%d', '%s' );
+        if ( $uupd_active ) {
+            $data['uupd_allow_rotate'] = isset( $_POST['uupd_allow_rotate'] ) && in_array( (int) $_POST['uupd_allow_rotate'], array( -1, 0, 1 ), true ) ? (int) $_POST['uupd_allow_rotate'] : -1;
+            $data['uupd_allow_children'] = isset( $_POST['uupd_allow_children'] ) && in_array( (int) $_POST['uupd_allow_children'], array( -1, 0, 1 ), true ) ? (int) $_POST['uupd_allow_children'] : -1;
+            if ( ! $enable_activation_limit && isset( $_POST['uupd_unlimited_children'] ) ) {
+                $data['uupd_max_children'] = -2;
+            } elseif ( isset( $_POST['uupd_max_children'] ) && '' !== trim( (string) wp_unslash( $_POST['uupd_max_children'] ) ) ) {
+                $requested_children = min( 32767, absint( wp_unslash( $_POST['uupd_max_children'] ) ) );
+                $data['uupd_max_children'] = $enable_activation_limit ? min( $requested_children, max( 1, $activation_limit ) ) : $requested_children;
+            } else {
+                $data['uupd_max_children'] = -1;
+            }
+            $formats[] = '%d';
+            $formats[] = '%d';
+            $formats[] = '%d';
+        }
 
         if ( $mapping_id > 0 ) {
             $result = $wpdb->update(
                 $this->table_name,
                 $data,
                 array( 'id' => $mapping_id ),
-                array( '%s', '%s', '%d', '%s', '%d', '%d', '%d', '%d', '%s' ),
+                $formats,
                 array( '%d' )
             );
             $redirect_url = admin_url( 'admin.php?page=rup-gateway-fc&message=updated' );
@@ -1469,7 +1803,7 @@ class Rup_Gateway_FC_Gateway {
             $result = $wpdb->insert(
                 $this->table_name,
                 $data,
-                array( '%s', '%s', '%d', '%s', '%d', '%d', '%d', '%d', '%s' )
+                $formats
             );
             $redirect_url = admin_url( 'admin.php?page=rup-gateway-fc&message=added' );
         }
@@ -1567,12 +1901,8 @@ class Rup_Gateway_FC_Gateway {
         $download_choices = $this->rup_gateway_fc_get_download_choices();
         $fluent_product_choices = $this->rup_gateway_fc_get_fluent_product_choices();
         ?>
-        <div class="wrap">
-            <h1>
-                FluentCart Licence Gateway
-                <a href="<?php echo admin_url( 'admin.php?page=rup-gateway-fc&action=add' ); ?>" class="page-title-action">Add New</a>
-                <a href="<?php echo admin_url( 'admin.php?page=rup-gateway-fc&action=settings' ); ?>" class="page-title-action">Settings</a>
-            </h1>
+        <div class="wrap rup-map-admin rup-map-list">
+            <div class="rup-map-page-heading"><div><span class="rup-map-eyebrow">FluentCart Licence Gateway</span><h1>Product mappings</h1><p>Choose which licence each FluentCart purchase creates.</p></div><div class="rup-map-page-actions"><a href="<?php echo esc_url( admin_url( 'admin.php?page=rup-gateway-fc&action=add' ) ); ?>" class="button button-primary">Add mapping</a><a href="<?php echo esc_url( admin_url( 'admin.php?page=rup-gateway-fc&action=settings' ) ); ?>" class="button">Settings</a></div></div>
             <?php
             // Determine the base URL for the form.
             // If the Hoster plugin is active, your page is nested under Downloads.
@@ -1592,47 +1922,37 @@ class Rup_Gateway_FC_Gateway {
             </form>
 
 
-            <table class="wp-list-table widefat fixed striped">
+            <div class="rup-map-panel rup-map-list-panel"><div class="rup-map-panel__heading"><span class="rup-map-eyebrow">Active provider</span><h2><?php echo esc_html( function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() ? 'UUPD Server' : 'Hoster' ); ?> mappings</h2><p>Mapping options apply when a new licence is issued.</p></div><div class="rup-map-table-wrap"><table class="wp-list-table widefat fixed striped">
                 <thead>
                     <tr>
-                        <th style="width:20%;">Friendly Name</th>
-                        <th style="width:22%;">FluentCart Product / Variation</th>
-                        <th>Licence Product</th>
-                        <th>Status</th>
-                        <th style="width:10%;">Activation Limit Enabled</th>
-                        <th>Activation Limit</th>
-                        <th>Lifetime</th>
-                        <th>Expiry Duration</th>
-                        <th>Expiry Unit</th>
-                        <th>Actions</th>
+                        <th style="width:20%;">Mapping</th>
+                        <th style="width:25%;">FluentCart purchase</th>
+                        <th style="width:25%;">Licence product</th>
+                        <th style="width:20%;">Issued licence</th>
+                        <th style="width:10%;">Actions</th>
                     </tr>
                 </thead>
                 <tbody>
                     <?php if ( $mappings ) : ?>
                         <?php foreach ( $mappings as $mapping ) : ?>
                             <tr>
-                                <td><?php echo esc_html( $mapping['friendly_name'] ); ?></td>
+                                <td><strong><?php echo esc_html( $mapping['friendly_name'] ); ?></strong></td>
                                 <td><?php echo esc_html( $this->rup_gateway_fc_get_fluent_product_label( $mapping['price_id'] ) ); ?><br><code><?php echo esc_html( $mapping['price_id'] ); ?></code></td>
                                 <td><?php echo esc_html( $this->rup_gateway_fc_get_download_label( $mapping['download_id'] ) ); ?><br><code><?php echo esc_html( $mapping['download_id'] ); ?></code></td>
-                                <td><?php echo esc_html( $mapping['status'] ); ?></td>
-                                <td><?php echo $mapping['enable_activation_limit'] ? 'Yes' : 'No'; ?></td>
-                                <td><?php echo esc_html( $mapping['activation_limit'] ); ?></td>
-                                <td><?php echo $mapping['lifetime'] ? 'Yes' : 'No'; ?></td>
-                                <td><?php echo esc_html( $mapping['expiry_duration'] ); ?></td>
-                                <td><?php echo esc_html( $mapping['expiry_unit'] ); ?></td>
+                                <td><span class="rup-map-status <?php echo 'active' === $mapping['status'] ? 'is-active' : 'is-inactive'; ?>"><?php echo esc_html( ucfirst( $mapping['status'] ) ); ?></span><small><?php echo esc_html( $mapping['enable_activation_limit'] ? (int) $mapping['activation_limit'] . ' activations' : 'Unlimited activations' ); ?></small><small><?php echo esc_html( $mapping['lifetime'] ? 'Lifetime' : (int) $mapping['expiry_duration'] . ' ' . strtolower( $mapping['expiry_unit'] ) ); ?></small></td>
                                 <td>
-                                    <a href="<?php echo admin_url( 'admin.php?page=rup-gateway-fc&action=edit&mapping_id=' . intval( $mapping['id'] ) ); ?>">Edit</a> |
-                                    <a href="<?php echo wp_nonce_url( admin_url( 'admin-post.php?action=rup_gateway_fc_delete_mapping&mapping_id=' . intval( $mapping['id'] ) ), 'rup_gateway_fc_delete_mapping_nonce' ); ?>" onclick="return confirmDelete();">Delete</a>
+                                    <a href="<?php echo esc_url( admin_url( 'admin.php?page=rup-gateway-fc&action=edit&mapping_id=' . intval( $mapping['id'] ) ) ); ?>">Edit</a><br>
+                                    <a href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=rup_gateway_fc_delete_mapping&mapping_id=' . intval( $mapping['id'] ) ), 'rup_gateway_fc_delete_mapping_nonce' ) ); ?>" onclick="return confirmDelete();">Delete</a>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
                     <?php else : ?>
                         <tr>
-                            <td colspan="11">No mappings found.</td>
+                            <td colspan="5">No mappings found. Add a mapping to issue licences from FluentCart purchases.</td>
                         </tr>
                     <?php endif; ?>
                 </tbody>
-            </table>
+            </table></div></div>
             <?php
             $total_pages = ceil( $total_items / $per_page );
             if ( $total_pages > 1 ) {
@@ -1650,7 +1970,6 @@ class Rup_Gateway_FC_Gateway {
             <script>
                 function confirmDelete() {
                     var confirmation = prompt("Type DELETE to confirm deletion of this mapping. This action cannot be undone.");
-                    console.log("confirmDelete() input: " + confirmation);
                     return (confirmation === "DELETE");
                 }
             </script>

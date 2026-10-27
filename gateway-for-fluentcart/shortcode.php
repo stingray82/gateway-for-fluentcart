@@ -31,6 +31,15 @@ function rup_gateway_fc_enqueue_license_management_assets() {
 }
 add_action( 'wp_enqueue_scripts', 'rup_gateway_fc_enqueue_license_management_assets' );
 
+function rup_gateway_fc_uupd_master_has_space( $license_id ) {
+    if ( ! function_exists( 'rup_gateway_fc_get_license_provider' ) || 'uupd' !== rup_gateway_fc_get_license_provider() || ! function_exists( 'uupd_license_master_limit' ) ) {
+        return true;
+    }
+    $master_id = uupd_license_master_id( $license_id );
+    $limit = uupd_license_master_limit( $master_id );
+    return ! $limit || uupd_license_family_usage( $master_id ) < $limit;
+}
+
 /**
  * AJAX handler for adding and removing sites.
  */
@@ -65,6 +74,9 @@ function rup_gateway_fc_manage_license_ajax() {
     }
     
     if ( 'add_site' === $action ) {
+        if ( function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() && function_exists( 'uupd_license_is_usable' ) && ! uupd_license_is_usable( $license_id ) ) {
+            wp_send_json_error( 'Licence inactive.' );
+        }
         // Sanitize new site URL.
         $new_site = isset( $_POST['new_site'] ) ? esc_url_raw( $_POST['new_site'] ) : '';
         if ( empty( $new_site ) ) {
@@ -72,9 +84,12 @@ function rup_gateway_fc_manage_license_ajax() {
         }
         
         // Check activation limit.
-        $activation_limit = intval( get_post_meta( $license_id, 'activation_limit', true ) );
+        $activation_limit = function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() && function_exists( 'uupd_license_master_limit' ) ? ( uupd_license_master_id( $license_id ) === $license_id ? uupd_license_master_limit( $license_id ) : uupd_child_activation_limit( $license_id ) ) : intval( get_post_meta( $license_id, 'activation_limit', true ) );
         if ( $activation_limit !== 0 && count( $used_sites ) >= $activation_limit ) {
             wp_send_json_error( 'Activation limit reached.' );
+        }
+        if ( ! rup_gateway_fc_uupd_master_has_space( $license_id ) ) {
+            wp_send_json_error( 'Master activation limit reached.' );
         }
         
         // Append the new site.
@@ -144,13 +159,13 @@ function rup_gateway_fc_licences_shortcode() {
     foreach ( $licenses as $license ) {
         $license_id       = $license->ID;
         $license_key      = function_exists( 'rup_gateway_fc_provider_get_license_key' ) ? rup_gateway_fc_provider_get_license_key( $license_id ) : get_post_meta( $license_id, 'license_key', true );
-        $activation_limit = intval( get_post_meta( $license_id, 'activation_limit', true ) );
+        $activation_limit = function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() && function_exists( 'uupd_license_master_limit' ) ? uupd_license_master_limit( $license_id ) : intval( get_post_meta( $license_id, 'activation_limit', true ) );
         $used_sites       = function_exists( 'rup_gateway_fc_provider_get_license_sites' ) ? rup_gateway_fc_provider_get_license_sites( $license_id ) : get_post_meta( $license_id, 'used_sites', true );
         $used_sites       = maybe_unserialize( $used_sites );
         if ( ! is_array( $used_sites ) ) {
             $used_sites = array();
         }
-        $used_site_count = count( $used_sites );
+        $used_site_count = function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() && function_exists( 'uupd_license_family_usage' ) ? uupd_license_family_usage( $license_id ) : count( $used_sites );
         $activation_limit_display = ( 0 === $activation_limit ) ? 'Unlimited' : (string) $activation_limit;
         $activation_usage_display = ( 0 === $activation_limit ) ? sprintf( '%d / ∞ Used', $used_site_count ) : sprintf( '%d / %d Used', $used_site_count, $activation_limit );
         
@@ -163,6 +178,9 @@ function rup_gateway_fc_licences_shortcode() {
         $download_url = ( $download_id && function_exists( 'rup_gateway_fc_provider_get_license_download_url' ) ) ? rup_gateway_fc_provider_get_license_download_url( $download_id ) : ( $download_id ? rup_gateway_fc_generate_secure_download_link( get_post_meta( $download_id, 'download_url', true ) ) : '' );
         
         $status = get_post_meta( $license_id, 'status', true );
+        if ( function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() && function_exists( 'uupd_license_is_usable' ) && ! uupd_license_is_usable( $license_id ) ) {
+            $status = 'inactive';
+        }
         $status_class = sanitize_html_class( strtolower( $status ? $status : 'unknown' ) );
 
         $output .= '<article class="rup-gateway-fc-license-card fct-card" id="license-' . $license_id . '">';
@@ -202,6 +220,9 @@ function rup_gateway_fc_licences_shortcode() {
         
         // Render the manage block with the manage_license shortcode.
         $output .= do_shortcode( '[rup_gateway_fc_manage_license license_id="' . $license_id . '"]' );
+        if ( function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() && function_exists( 'uupd_license_keys_shortcode' ) && function_exists( 'uupd_license_key_manager_available' ) && function_exists( 'uupd_license_key_manager_label' ) && uupd_license_key_manager_available( $license_id ) ) {
+            $output .= '<details class="rup-gateway-fc-key-manager"><summary>' . esc_html( uupd_license_key_manager_label( $license_id ) ) . '</summary>' . uupd_license_keys_shortcode( array( 'license_id' => $license_id ) ) . '</details>';
+        }
         $output .= '</div>'; // .accordion-content
         
         $output .= '</article>'; // .rup-gateway-fc-license-card
@@ -260,7 +281,7 @@ function rup_gateway_fc_manage_license_shortcode( $atts ) {
     }
     
     // Retrieve the activation limit and current sites.
-    $activation_limit = intval( get_post_meta( $license_id, 'activation_limit', true ) );
+    $activation_limit = function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() && function_exists( 'uupd_license_master_limit' ) ? ( uupd_license_master_id( $license_id ) === $license_id ? uupd_license_master_limit( $license_id ) : uupd_child_activation_limit( $license_id ) ) : intval( get_post_meta( $license_id, 'activation_limit', true ) );
     $used_sites       = function_exists( 'rup_gateway_fc_provider_get_license_sites' ) ? rup_gateway_fc_provider_get_license_sites( $license_id ) : get_post_meta( $license_id, 'used_sites', true );
     $used_sites       = maybe_unserialize( $used_sites );
     if ( ! is_array( $used_sites ) ) {
@@ -285,7 +306,7 @@ function rup_gateway_fc_manage_license_shortcode( $atts ) {
     }
     
     // Form for adding a new site.
-    if ( $activation_limit === 0 || count( $used_sites ) < $activation_limit ) {
+    if ( ( $activation_limit === 0 || count( $used_sites ) < $activation_limit ) && rup_gateway_fc_uupd_master_has_space( $license_id ) && ( ! function_exists( 'rup_gateway_fc_get_license_provider' ) || 'uupd' !== rup_gateway_fc_get_license_provider() || ! function_exists( 'uupd_license_is_usable' ) || uupd_license_is_usable( $license_id ) ) ) {
         $output .= '<form class="add-site-form" data-license-id="' . $license_id . '">';
         $output .= '<input type="text" name="new_site" placeholder="Enter site URL" required>';
         $output .= ' <button type="submit" class="rup-gateway-fc-primary-button">Add Site</button>';
@@ -338,12 +359,13 @@ function rup_gateway_fc_handle_license_site_submission() {
         }
 
         if ( 'add_site' === $action ) {
+            if ( function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() && function_exists( 'uupd_license_is_usable' ) && ! uupd_license_is_usable( $license_id ) ) { return; }
             // Sanitize new site URL.
             $new_site = isset( $_POST['new_site'] ) ? esc_url_raw( $_POST['new_site'] ) : '';
             if ( $new_site ) {
                 // Check activation limit.
-                $activation_limit = intval( get_post_meta( $license_id, 'activation_limit', true ) );
-                if ( $activation_limit !== 0 && count( $used_sites ) >= $activation_limit ) {
+                $activation_limit = function_exists( 'rup_gateway_fc_get_license_provider' ) && 'uupd' === rup_gateway_fc_get_license_provider() && function_exists( 'uupd_license_master_limit' ) ? ( uupd_license_master_id( $license_id ) === $license_id ? uupd_license_master_limit( $license_id ) : uupd_child_activation_limit( $license_id ) ) : intval( get_post_meta( $license_id, 'activation_limit', true ) );
+                if ( ( $activation_limit !== 0 && count( $used_sites ) >= $activation_limit ) || ! rup_gateway_fc_uupd_master_has_space( $license_id ) ) {
                     // Optionally add an error message.
                 } else {
                     // Append new site.

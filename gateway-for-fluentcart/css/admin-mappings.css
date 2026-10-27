@@ -1,0 +1,34 @@
+.rup-map-admin { max-width: 1280px; color: #172033; }
+.rup-map-page-heading { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; margin: 18px 0 22px; }
+.rup-map-page-heading h1 { padding: 0; margin: 4px 0 7px; font-size: 27px; line-height: 1.2; font-weight: 700; }
+.rup-map-page-heading p, .rup-map-panel__heading p { margin: 0; color: #64748b; font-size: 14px; }
+.rup-map-eyebrow { color: #576b86; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; }
+.rup-map-page-actions { display: flex; gap: 8px; }
+.rup-map-panel { margin: 0 0 18px; padding: 22px 24px; background: #fff; border: 1px solid #dfe5ed; border-radius: 12px; box-shadow: 0 1px 3px rgba(17, 24, 39, .04); }
+.rup-map-panel__heading { padding-bottom: 17px; border-bottom: 1px solid #e7ebf0; }
+.rup-map-panel__heading h2 { margin: 5px 0 6px; font-size: 19px; line-height: 1.3; }
+.rup-map-panel .form-table { margin: 4px 0 0; }
+.rup-map-panel .form-table tr { border-bottom: 1px solid #edf1f5; }
+.rup-map-panel .form-table tr:last-child { border-bottom: 0; }
+.rup-map-panel .form-table th { width: 225px; padding: 20px 16px 20px 0; color: #344054; font-weight: 650; }
+.rup-map-panel .form-table td { padding: 15px 0; }
+.rup-map-panel .form-table input[type="text"], .rup-map-panel .form-table input[type="number"], .rup-map-panel .form-table select { box-sizing: border-box; min-height: 38px; border-color: #c8d3df; border-radius: 7px; }
+.rup-map-panel .form-table input.regular-text { width: min(100%, 520px); }
+.rup-map-panel .form-table select { min-width: 190px; }
+.rup-map-panel .form-table .description { max-width: 620px; color: #667085; line-height: 1.5; }
+.rup-map-panel .form-table .small-text { width: 130px; }
+.rup-map-check { display: flex; gap: 7px; align-items: center; margin-top: 13px; font-weight: 600; }
+.rup-map-check input { margin: 0; }
+.rup-map-form__actions { display: flex; align-items: center; gap: 15px; margin: 18px 0 32px; }
+.rup-map-form__actions p.submit { margin: 0; padding: 0; }
+.rup-map-list .search-box { margin: 0 0 15px; }
+.rup-map-table-wrap { overflow-x: auto; padding-top: 18px; }
+.rup-map-table-wrap table { border: 0; box-shadow: none; min-width: 770px; }
+.rup-map-table-wrap th { color: #475467; font-weight: 700; }
+.rup-map-table-wrap td { padding: 15px 10px; vertical-align: top; }
+.rup-map-table-wrap td code { display: inline-block; margin-top: 5px; color: #667085; font-size: 11px; white-space: normal; overflow-wrap: anywhere; }
+.rup-map-table-wrap td small { display: block; margin-top: 6px; color: #667085; }
+.rup-map-status { display: inline-block; padding: 4px 9px; border-radius: 99px; background: #fef0ef; color: #a62a21; font-size: 11px; font-weight: 700; }
+.rup-map-status.is-active { background: #e8f7ef; color: #167348; }
+.rup-map-table-wrap td a { line-height: 1.8; }
+@media (max-width: 782px) { .rup-map-panel { padding: 17px; } .rup-map-panel .form-table th, .rup-map-panel .form-table td { display: block; width: auto; padding: 9px 0; } .rup-map-panel .form-table td { padding-bottom: 15px; } .rup-map-panel .form-table tr { display: block; } }
